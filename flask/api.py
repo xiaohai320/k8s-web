@@ -1,7 +1,7 @@
 
 
 import requests
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify, abort, json
 from kubernetes import client, config
 from flask_cors import CORS
 from kubernetes.client import ApiException
@@ -185,9 +185,127 @@ def list_svc():
     pod_label = request.args.get('label','')
     try:
         svc=core_v1.list_namespaced_service(namespace,label_selector=pod_label)
-        print(jsonify([svc.to_dict() for svc in svc.items]))
         return jsonify([svc.to_dict() for svc in svc.items]),200
     except client.exceptions.ApiException as e:
         return jsonify({"error":"error"}),500
+@app.route('/namespaces', methods=['GET'])
+def list_namespaces():
+    try:
+        namespaces = core_v1.list_namespace()
+        namespace_list = [ns.metadata.name for ns in namespaces.items]
+        return jsonify(namespace_list), 200
+    except client.exceptions.ApiException as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/controllers', methods=['GET'])
+def list_controllers():
+    namespace = request.args.get('namespace', 'default')
+    podcontrollername = request.args.get('podcontrollername')
+    podcontrollertype = request.args.get('podcontrollertype')
+
+    try:
+        if not podcontrollername and not podcontrollertype:
+            # 如果没有指定参数，返回所有控制器的数据
+            deployments = apps_v1.list_namespaced_deployment(namespace)
+            stateful_sets = apps_v1.list_namespaced_stateful_set(namespace)
+            daemon_sets = apps_v1.list_namespaced_daemon_set(namespace)
+            controllers = {
+                'deployments': [deployment.to_dict() for deployment in deployments.items],
+                'stateful_sets': [stateful_set.to_dict() for stateful_set in stateful_sets.items],
+                'daemon_sets': [daemon_set.to_dict() for daemon_set in daemon_sets.items]
+            }
+            return jsonify(controllers), 200
+        elif podcontrollername and not podcontrollertype:
+            # 如果只指定了 podcontrollername，返回所有类型的控制器中名称匹配的数据
+            deployments = [d.to_dict() for d in apps_v1.list_namespaced_deployment(namespace).items if d.metadata.name == podcontrollername]
+            stateful_sets = [s.to_dict() for s in apps_v1.list_namespaced_stateful_set(namespace).items if s.metadata.name == podcontrollername]
+            daemon_sets = [d.to_dict() for d in apps_v1.list_namespaced_daemon_set(namespace).items if d.metadata.name == podcontrollername]
+
+            controllers = {
+                'deployments': deployments,
+                'stateful_sets': stateful_sets,
+                'daemon_sets': daemon_sets
+            }
+            return jsonify(controllers), 200
+        elif podcontrollertype and not podcontrollername:
+            # 如果只指定了 podcontrollertype，返回该类型的所有控制器数据
+            if podcontrollertype == 'deployment':
+                deployments = apps_v1.list_namespaced_deployment(namespace)
+                return jsonify({'deployments': [d.to_dict() for d in deployments.items]}), 200
+            elif podcontrollertype == 'statefulset':
+                stateful_sets = apps_v1.list_namespaced_stateful_set(namespace)
+                return jsonify({'stateful_sets': [s.to_dict() for s in stateful_sets.items]}), 200
+            elif podcontrollertype == 'daemonset':
+                daemon_sets = apps_v1.list_namespaced_daemon_set(namespace)
+                return jsonify({'daemon_sets': [d.to_dict() for d in daemon_sets.items]}), 200
+            else:
+                return jsonify({"error": f"Unsupported controller type: {podcontrollertype}"}), 400
+        else:
+            # 如果同时指定了 podcontrollername 和 podcontrollertype，返回该类型中名称匹配的数据
+            if podcontrollertype == 'deployment':
+                deployments = apps_v1.list_namespaced_deployment(namespace)
+                filtered_deployments = [d.to_dict() for d in deployments.items if d.metadata.name == podcontrollername]
+                return jsonify({'deployments': filtered_deployments}), 200
+            elif podcontrollertype == 'statefulset':
+                stateful_sets = apps_v1.list_namespaced_stateful_set(namespace)
+                filtered_stateful_sets = [s.to_dict() for s in stateful_sets.items if s.metadata.name == podcontrollername]
+                return jsonify({'stateful_sets': filtered_stateful_sets}), 200
+            elif podcontrollertype == 'daemonset':
+                daemon_sets = apps_v1.list_namespaced_daemon_set(namespace)
+                filtered_daemon_sets = [d.to_dict() for d in daemon_sets.items if d.metadata.name == podcontrollername]
+                return jsonify({'daemon_sets': filtered_daemon_sets}), 200
+            else:
+                return jsonify({"error": f"Unsupported controller type: {podcontrollertype}"}), 400
+    except client.exceptions.ApiException as e:
+        return jsonify({"error": str(e)}), 500
+
+PROCESSED_ALERTS_FILE = 'processed_alerts.txt'
+ALERT_FILE = 'alerts.log'
+@app.route('/getalertinfo', methods=['GET'])
+def get_alert_info():
+    page = int(request.args.get('page', 1))
+    pageSize = int(request.args.get('pageSize', 10))
+    try:
+        with open(PROCESSED_ALERTS_FILE, 'r') as file:
+            alerts = [json.loads(line) for line in file]
+        total = len(alerts)
+        start = (page - 1) * pageSize
+        end = start + pageSize
+        paginated_alerts = alerts[start:end]
+        return jsonify({
+            'total': total,
+            'alerts': paginated_alerts
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+@app.route('/postalertinfo', methods=['POST'])
+def post_alert_info():
+    print("正在请求！！")
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+    # 解析告警信息
+    alerts = data.get('alerts', [])
+    processed_alerts = []
+    for alert in alerts:
+        processed_alert = {
+            'startsAt': alert['startsAt'],
+            'alertname': alert['labels']['alertname'],
+            'description': alert['annotations']['description'],
+            'severity': alert['labels']['severity']
+        }
+        processed_alerts.append(processed_alert)
+
+    # 将处理后的告警信息保存到文件中
+    with open(PROCESSED_ALERTS_FILE, 'a') as file:
+        for alert in processed_alerts:
+            file.write(json.dumps(alert) + '\n')
+
+    # 将原始告警信息写入文件
+    with open(ALERT_FILE, 'a') as file:
+        file.write(json.dumps(data) + '\n')
+
+    return jsonify({'status': 'success', 'message': 'Alert received and saved'}), 200
+
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
